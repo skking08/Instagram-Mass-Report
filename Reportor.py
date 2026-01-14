@@ -1,0 +1,290 @@
+import random
+import time
+import tkinter as tk
+from tkinter import ttk, scrolledtext, messagebox
+import threading
+from selenium import webdriver
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.chrome.options import Options
+from selenium.common.exceptions import TimeoutException, NoSuchElementException
+import json
+
+class InstagramReporterGUI:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("IG Mass Report Tool v2.0")
+        self.root.geometry("800x700")
+        self.root.resizable(True, True)
+        
+        self.accounts = []
+        self.results = []
+        self.is_running = False
+        
+        self.setup_ui()
+    
+    def setup_ui(self):
+        # Main notebook
+        notebook = ttk.Notebook(self.root)
+        notebook.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        
+        # Accounts tab
+        accounts_frame = ttk.Frame(notebook)
+        notebook.add(accounts_frame, text="Accounts")
+        self.setup_accounts_tab(accounts_frame)
+        
+        # Settings tab  
+        settings_frame = ttk.Frame(notebook)
+        notebook.add(settings_frame, text="Settings")
+        self.setup_settings_tab(settings_frame)
+        
+        # Logs tab
+        logs_frame = ttk.Frame(notebook)
+        notebook.add(logs_frame, text="Logs")
+        self.setup_logs_tab(logs_frame)
+    
+    def setup_accounts_tab(self, parent):
+        # Load/Save buttons
+        btn_frame = ttk.Frame(parent)
+        btn_frame.pack(fill=tk.X, padx=10, pady=5)
+        
+        ttk.Button(btn_frame, text="Load Accounts", command=self.load_accounts).pack(side=tk.LEFT)
+        ttk.Button(btn_frame, text="Save Accounts", command=self.save_accounts).pack(side=tk.LEFT)
+        ttk.Button(btn_frame, text="Add Account", command=self.add_account_row).pack(side=tk.LEFT)
+        
+        # Accounts table
+        columns = ("#", "Username", "Password", "Proxy", "Status")
+        self.accounts_tree = ttk.Treeview(parent, columns=columns, show="headings", height=15)
+        
+        for col in columns:
+            self.accounts_tree.heading(col, text=col)
+            self.accounts_tree.column(col, width=120)
+        
+        scrollbar = ttk.Scrollbar(parent, orient=tk.VERTICAL, command=self.accounts_tree.yview)
+        self.accounts_tree.configure(yscrollcommand=scrollbar.set)
+        
+        self.accounts_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=10, pady=10)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y, pady=10)
+        
+        # Default accounts
+        self.add_default_accounts()
+    
+    def setup_settings_tab(self, parent):
+        ttk.Label(parent, text="Target Username:").pack(pady=5)
+        self.target_var = tk.StringVar(value="your_target_account")
+        ttk.Entry(parent, textvariable=self.target_var, width=50, font=("Arial", 12)).pack(pady=5)
+        
+        ttk.Label(parent, text="Delay between reports (seconds):").pack(pady=(20,5))
+        self.delay_var = tk.DoubleVar(value=60)
+        delay_scale = ttk.Scale(parent, from_=10, to=300, variable=self.delay_var, orient=tk.HORIZONTAL)
+        delay_scale.pack(fill=tk.X, padx=20, pady=5)
+        ttk.Label(parent, textvariable=self.delay_var).pack()
+        
+        ttk.Separator(parent, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=20)
+        
+        ttk.Button(parent, text="START REPORTING", command=self.start_reporting,
+                  style="Accent.TButton").pack(pady=20, ipadx=30, ipady=10)
+    
+    def setup_logs_tab(self, parent):
+        self.log_text = scrolledtext.ScrolledText(parent, height=25, font=("Consolas", 10))
+        self.log_text.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+    
+    def log(self, message):
+        self.log_text.insert(tk.END, f"[{time.strftime('%H:%M:%S')}] {message}\n")
+        self.log_text.see(tk.END)
+        self.root.update()
+    
+    def add_default_accounts(self):
+        defaults = [
+            {"user": "burner1_test", "pass": "pass123", "proxy": "proxy1"},
+            {"user": "burner2_test", "pass": "pass456", "proxy": "proxy2"}
+        ]
+        for acc in defaults:
+            self.add_account_row(acc)
+    
+    def add_account_row(self, account=None):
+        if account is None:
+            account = {"user": "", "pass": "", "proxy": ""}
+        
+        item = self.accounts_tree.insert("", "end", values=(
+            len(self.accounts)+1, account["user"], "*****", account["proxy"], "Ready"
+        ))
+        self.accounts.append(account)
+        self.accounts_tree.selection_set(item)
+    
+    def load_accounts(self):
+        try:
+            with open("accounts.json", "r") as f:
+                data = json.load(f)
+                self.accounts = data
+                self.accounts_tree.delete(*self.accounts_tree.get_children())
+                for i, acc in enumerate(self.accounts):
+                    self.accounts_tree.insert("", "end", values=(
+                        i+1, acc["user"], "*****", acc["proxy"], "Ready"
+                    ))
+            self.log("✅ Accounts loaded from accounts.json")
+        except:
+            self.log("❌ No accounts.json found")
+    
+    def save_accounts(self):
+        try:
+            # Hide passwords in treeview
+            for i, item in enumerate(self.accounts_tree.get_children()):
+                values = self.accounts_tree.item(item, "values")
+                self.accounts[i]["user"] = values[1]
+                self.accounts[i]["proxy"] = values[3]
+            
+            with open("accounts.json", "w") as f:
+                json.dump(self.accounts, f, indent=2)
+            self.log("💾 Accounts saved to accounts.json")
+        except Exception as e:
+            self.log(f"❌ Save failed: {e}")
+    
+    def create_stealth_driver(self, proxy_idx):
+        options = Options()
+        options.add_argument("--headless")
+        options.add_argument("--no-sandbox")
+        options.add_argument("--disable-dev-shm-usage")
+        options.add_argument("--disable-blink-features=AutomationControlled")
+        options.add_experimental_option("excludeSwitches", ["enable-automation"])
+        options.add_experimental_option('useAutomationExtension', False)
+        
+        proxy = self.accounts[proxy_idx]["proxy"] or "direct"
+        if proxy != "direct":
+            options.add_argument(f"--proxy-server={proxy}")
+        
+        options.add_argument(f"--user-data-dir=/tmp/ig{proxy_idx}")
+        
+        ua_list = [
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
+        ]
+        options.add_argument(f"--user-agent={random.choice(ua_list)}")
+        
+        driver = webdriver.Chrome(options=options)
+        driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
+        return driver
+    
+    def login_and_report(self, account_idx, account, target):
+        self.log(f"🚀 [{account_idx+1}] @{account['user']} starting...")
+        
+        try:
+            driver = self.create_stealth_driver(account_idx)
+            
+            # Fixed login URL
+            driver.get("https://www.instagram.com/accounts/login/")
+            time.sleep(random.uniform(3, 5))
+            
+            username_field = WebDriverWait(driver, 10).until(
+                EC.presence_of_element_located((By.NAME, "username"))
+            )
+            username_field.clear()
+            username_field.send_keys(account["user"])
+            
+            password_field = driver.find_element(By.NAME, "password")
+            password_field.clear()
+            password_field.send_keys(account["pass"])
+            driver.find_element(By.XPATH, "//button[@type='submit']").click()
+            
+            time.sleep(8)
+            
+            # Fixed target URL
+            driver.get(f"https://www.instagram.com/{target}/")
+            time.sleep(random.uniform(4, 6))
+            
+            # Report flow with better selectors
+            more_btn = WebDriverWait(driver, 15).until(
+                EC.element_to_be_clickable((By.CSS_SELECTOR, "[aria-label*='More options'], [aria-label*='options']"))
+            )
+            more_btn.click()
+            
+            report_btn = WebDriverWait(driver, 10).until(
+                EC.element_to_be_clickable((By.XPATH, "//*[contains(text(), 'Report') or @data-testid*='report']"))
+            )
+            report_btn.click()
+            
+            # Spam reason
+            spam_btn = WebDriverWait(driver, 10).until(
+                EC.element_to_be_clickable((By.XPATH, "//*[contains(text(), 'Spam') or contains(text(), 'something')]"))
+            )
+            spam_btn.click()
+            
+            sub_reason = WebDriverWait(driver, 10).until(
+                EC.element_to_be_clickable((By.XPATH, "//*[contains(text(), 'Spam') or contains(text(), 'Scam')]"))
+            )
+            sub_reason.click()
+            
+            submit_btn = WebDriverWait(driver, 5).until(
+                EC.element_to_be_clickable((By.XPATH, "//button[contains(text(), 'Submit') or contains(text(), 'Send')]"))
+            )
+            submit_btn.click()
+            
+            self.log(f"✅ [{account_idx+1}] @{account['user']} → SUCCESS")
+            self.root.after(0, lambda: self.update_status(account_idx, "✅ SUCCESS"))
+            return True
+            
+        except Exception as e:
+            self.log(f"❌ [{account_idx+1}] FAILED: {str(e)[:80]}")
+            self.root.after(0, lambda: self.update_status(account_idx, "❌ FAILED"))
+            return False
+        
+        finally:
+            try:
+                driver.quit()
+            except:
+                pass
+    
+    def update_status(self, idx, status):
+        children = self.accounts_tree.get_children()
+        if idx < len(children):
+            item = children[idx]
+            values = list(self.accounts_tree.item(item, "values"))
+            values[4] = status
+            self.accounts_tree.item(item, values=values)
+    
+    def start_reporting(self):
+        if self.is_running:
+            return
+        
+        target = self.target_var.get().strip()
+        if not target:
+            messagebox.showerror("Error", "Enter target username!")
+            return
+        
+        self.is_running = True
+        self.results = []
+        self.log(f"🎯 Starting {len(self.accounts)} reports on @{target}")
+        
+        def run_reports():
+            for i, account in enumerate(self.accounts):
+                if not self.is_running:
+                    break
+                
+                success = self.login_and_report(i, account, target)
+                self.results.append(success)
+                
+                if i < len(self.accounts) - 1:
+                    delay = self.delay_var.get()
+                    self.log(f"⏳ Waiting {delay:.0f}s before next...")
+                    time.sleep(delay)
+            
+            total = len(self.accounts)
+            success_count = sum(self.results)
+            self.log(f"📊 FINAL: {success_count}/{total} SUCCESS ({success_count/total*100:.1f}%)")
+            
+            self.root.after(0, self.reporting_complete)
+        
+        threading.Thread(target=run_reports, daemon=True).start()
+    
+    def reporting_complete(self):
+        self.is_running = False
+        messagebox.showinfo("Complete", f"Reports finished!\n{sum(self.results)}/{len(self.accounts)} successful")
+
+def main():
+    root = tk.Tk()
+    app = InstagramReporterGUI(root)
+    root.mainloop()
+
+if __name__ == "__main__":
+    main()
